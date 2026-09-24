@@ -251,17 +251,127 @@ button.icon {
   margin: 8px 0 0;
 }
 
-progress {
-  width: 100%;
-  height: 12px;
+.progress {
   margin-top: 16px;
-  accent-color: var(--accent);
 }
 
-.stats {
+.progress-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 6px;
+  min-width: 0;
+}
+
+.pct {
+  font-size: 28px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.phase {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar {
+  height: 14px;
+  border-radius: 7px;
+  background: var(--border);
+  overflow: hidden;
+}
+
+.bar .fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 7px;
+  transition: width 0.25s linear;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.stat-grid div {
+  background: var(--bg);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+
+.stat-grid b {
+  display: block;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-grid span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.clip {
+  position: relative;
+  overflow: hidden;
+}
+
+.clip .clip-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  width: 0;
+  background: var(--accent);
+}
+
+.clip.active {
+  border-color: var(--accent);
+}
+
+.full {
+  grid-column: 1 / -1;
+}
+
+.hw {
+  font-size: 14px;
+}
+
+.hw:empty {
+  display: none;
+}
+
+.hw .row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+}
+
+.hw .ok {
+  color: var(--ok);
+}
+
+.hw .bad {
+  color: var(--danger);
+}
+
+.hw .tip {
   color: var(--muted);
   font-size: 13px;
-  font-variant-numeric: tabular-nums;
+  margin: 4px 0 0;
+}
+
+.confirm p {
+  margin: 0 0 8px;
+}
+
+.meta .gpu {
+  color: var(--ok);
 }
 
 .notice {

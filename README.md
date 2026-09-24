@@ -14,6 +14,10 @@ Everything runs locally in the browser via [WebCodecs](https://developer.mozilla
 - Constant output frame rate (60 fps default; also 30 / 120 / 144). Frames are duplicated or dropped against a fixed
   timeline, so 24, 30, 59.94, 144 fps and variable-frame-rate sources all line up.
 - H.264, HEVC, AV1 or VP9, whichever the browser can encode at the chosen size. Quality presets or a fixed bitrate.
+- GPU check: each codec is probed for a hardware encoder and each clip for a hardware decoder, using the browser's
+  own capability check. "GPU only" mode (the default when available) makes the browser use the GPU or fail, instead
+  of silently falling back to a slow CPU encoder. If anything would run on the CPU you're asked to confirm first.
+- Live progress: overall bar, per-clip bars, encode fps, speed vs. real time, and time remaining (also in the tab title).
 - Audio is resampled to 48 kHz stereo (AAC, or Opus when AAC encoding isn't available). Clips without audio get
   silence so sync holds across the whole file.
 - In Chrome and Edge the output streams straight to a file on disk, so multi-GB results don't need to fit in memory.

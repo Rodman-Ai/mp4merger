@@ -36,6 +36,8 @@ export interface ClipInfo {
   fps: number;
   codec: string;
   canDecode: boolean;
+  /** Whether the GPU has a decoder for this clip's exact codec profile and size. */
+  hwDecode: boolean;
 }
 
 export async function probeClip(file: File): Promise<ClipInfo> {
@@ -47,11 +49,12 @@ export async function probeClip(file: File): Promise<ClipInfo> {
   }
   const audio = await input.getPrimaryAudioTrack();
   const tracks = audio ? [video, audio] : [video];
-  const [start, end, stats, canDecode] = await Promise.all([
+  const [start, end, stats, canDecode, hwDecode] = await Promise.all([
     input.getFirstTimestamp(tracks),
     input.computeDuration(tracks),
     video.computePacketStats(120),
     video.canDecode(),
+    canDecodeInHardware(video),
   ]);
   return {
     file,
@@ -65,7 +68,19 @@ export async function probeClip(file: File): Promise<ClipInfo> {
     fps: stats.averagePacketRate,
     codec: video.codec ?? 'unknown',
     canDecode,
+    hwDecode,
   };
+}
+
+async function canDecodeInHardware(video: InputVideoTrack): Promise<boolean> {
+  const config = await video.getDecoderConfig();
+  if (!config || typeof VideoDecoder === 'undefined') return false;
+  try {
+    const res = await VideoDecoder.isConfigSupported({ ...config, hardwareAcceleration: 'prefer-hardware' });
+    return !!res.supported;
+  } catch {
+    return false;
+  }
 }
 
 export const AUDIO_SAMPLE_RATE = 48000;
@@ -77,8 +92,31 @@ export interface MergeOptions {
   frameRate: number;
   codec: VideoCodec;
   quality: QualityLevel | number;
+  /** 'require' makes the browser use GPU encode/decode or fail, never silently fall back to software. */
+  acceleration: 'require' | 'auto';
   signal: AbortSignal;
-  onProgress: (doneSeconds: number, totalSeconds: number) => void;
+  onProgress: (p: MergeProgress) => void;
+}
+
+export interface MergeProgress {
+  /** Seconds of output timeline processed so far. */
+  done: number;
+  total: number;
+  clipIndex: number;
+  /** Seconds processed within the current clip. */
+  clipDone: number;
+  framesEncoded: number;
+}
+
+/**
+ * Quality presets always resolve to a target bitrate. Mediabunny would otherwise try constant-quantizer mode first,
+ * which GPU encoders in Chrome/Edge often don't offer, so the browser quietly switches to a (very slow) software
+ * encoder.
+ */
+export function makeQuality(quality: QualityLevel | number): Quality {
+  return typeof quality === 'number'
+    ? new Quality({ bitrate: quality })
+    : new Quality({ quality, preferBitrate: true });
 }
 
 export type OutputSink =
@@ -92,10 +130,30 @@ export async function pickAudioCodec(): Promise<AudioCodec | null> {
   });
 }
 
-export async function supportedVideoCodecs(width: number, height: number, frameRate: number): Promise<VideoCodec[]> {
+export interface EncoderSupport {
+  codec: VideoCodec;
+  hardware: boolean;
+  software: boolean;
+}
+
+/** Probes each codec with the exact settings the merge will use, once requiring the GPU and once allowing anything. */
+export async function probeEncoders(
+  width: number,
+  height: number,
+  frameRate: number,
+  quality: QualityLevel | number,
+): Promise<EncoderSupport[]> {
   const candidates: VideoCodec[] = ['avc', 'hevc', 'av1', 'vp9'];
-  const ok = await Promise.all(candidates.map((c) => canEncodeVideo(c, { width, height, frameRate })));
-  return candidates.filter((_, i) => ok[i]);
+  const q = makeQuality(quality);
+  const probe = (codec: VideoCodec, hardwareAcceleration: 'prefer-hardware' | 'no-preference') =>
+    canEncodeVideo(codec, { width, height, frameRate, quality: q, hardwareAcceleration }).catch(() => false);
+  const results = await Promise.all(
+    candidates.map(async (codec) => {
+      const [hardware, any] = await Promise.all([probe(codec, 'prefer-hardware'), probe(codec, 'no-preference')]);
+      return { codec, hardware, software: any };
+    }),
+  );
+  return results.filter((r) => r.hardware || r.software);
 }
 
 /**
@@ -120,11 +178,16 @@ export async function mergeClips(clips: ClipInfo[], sink: OutputSink, opts: Merg
     target,
   });
 
+  let framesEncoded = 0;
   const videoSource = new VideoSampleSource({
     codec: opts.codec,
-    quality: typeof opts.quality === "number" ? new Quality({ bitrate: opts.quality }) : new Quality(opts.quality),
+    quality: makeQuality(opts.quality),
     keyFrameInterval: 2,
+    hardwareAcceleration: opts.acceleration === 'require' ? 'prefer-hardware' : 'no-preference',
     transform: { frameRate },
+    onEncodedPacket: () => {
+      framesEncoded++;
+    },
   });
   output.addVideoTrack(videoSource, { frameRate });
 
@@ -141,11 +204,12 @@ export async function mergeClips(clips: ClipInfo[], sink: OutputSink, opts: Merg
 
   try {
     let offset = 0;
-    for (const clip of clips) {
+    for (const [clipIndex, clip] of clips.entries()) {
       const clipOffset = offset;
-      const tasks: Promise<void>[] = [
-        pumpVideo(clip, clipOffset, videoSource, opts, (t) => opts.onProgress(clipOffset + t, total)),
-      ];
+      const report = (t: number) =>
+        opts.onProgress({ done: clipOffset + t, total, clipIndex, clipDone: t, framesEncoded });
+      report(0);
+      const tasks: Promise<void>[] = [pumpVideo(clip, clipOffset, videoSource, opts, report)];
       if (audioSource) {
         tasks.push(
           clip.audio
@@ -164,7 +228,13 @@ export async function mergeClips(clips: ClipInfo[], sink: OutputSink, opts: Merg
     throw err;
   }
 
-  opts.onProgress(total, total);
+  opts.onProgress({
+    done: total,
+    total,
+    clipIndex: clips.length - 1,
+    clipDone: clips[clips.length - 1]?.duration ?? 0,
+    framesEncoded,
+  });
   if (target instanceof BufferTarget) {
     return new Blob([target.buffer!], { type: 'video/mp4' });
   }
@@ -178,7 +248,9 @@ async function pumpVideo(
   opts: MergeOptions,
   onTime: (t: number) => void,
 ) {
-  const sink = new VideoSampleSink(clip.video);
+  const sink = new VideoSampleSink(clip.video, {
+    hardwareAcceleration: opts.acceleration === 'require' && clip.hwDecode ? 'prefer-hardware' : 'no-preference',
+  });
   for await (const sample of sink.samples()) {
     try {
       opts.signal.throwIfAborted();

@@ -82,6 +82,14 @@
             <span>Mbps</span>
           </div>
         </div>
+        <div class="field">
+          <label for="accel">Acceleration</label>
+          <select id="accel">
+            <option value="require" selected>GPU only</option>
+            <option value="auto">Allow CPU fallback</option>
+          </select>
+        </div>
+        <div id="hw-status" class="hw full" aria-live="polite"></div>
       </section>
 
       <section class="card run">
@@ -90,9 +98,22 @@
           <button type="button" id="cancel" hidden>Cancel</button>
         </div>
         <p class="hint" id="save-hint"></p>
-        <div id="progress-wrap" hidden>
-          <progress id="progress" max="1" value="0"></progress>
-          <div class="stats" id="stats"></div>
+        <div id="confirm-sw" class="notice error confirm" hidden>
+          <p id="confirm-sw-text"></p>
+          <div class="buttons">
+            <button type="button" id="confirm-sw-go">Merge anyway on CPU</button>
+            <button type="button" id="confirm-sw-cancel" class="ghost">Cancel</button>
+          </div>
+        </div>
+        <div id="progress-wrap" class="progress" hidden>
+          <div class="progress-head">
+            <span id="pct" class="pct">0%</span>
+            <span id="phase" class="phase"></span>
+          </div>
+          <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="bar">
+            <div class="fill" id="bar-fill"></div>
+          </div>
+          <div class="stat-grid" id="stats"></div>
         </div>
         <div id="status" class="notice" hidden></div>
         <div id="result" hidden>
