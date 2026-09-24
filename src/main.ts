@@ -1,5 +1,13 @@
-import { CanvasSink, type QualityLevel, type VideoCodec } from 'mediabunny';
-import { mergeClips, probeClip, supportedVideoCodecs, type ClipInfo, type OutputSink } from './merge';
+import { CanvasSink, type VideoCodec } from 'mediabunny';
+import {
+  mergeClips,
+  probeClip,
+  probeEncoders,
+  type ClipInfo,
+  type EncoderSupport,
+  type MergeProgress,
+  type OutputSink,
+} from './merge';
 
 type Entry = { id: number; file: File; info?: ClipInfo; thumb?: string; error?: string };
 
@@ -23,15 +31,22 @@ const mergeBtn = $<HTMLButtonElement>('merge');
 const cancelBtn = $<HTMLButtonElement>('cancel');
 const saveHint = $('save-hint');
 const progressWrap = $('progress-wrap');
-const progress = $<HTMLProgressElement>('progress');
+const pct = $('pct');
+const phase = $('phase');
+const bar = $('bar');
+const barFill = $('bar-fill');
 const stats = $('stats');
+const accelSel = $<HTMLSelectElement>('accel');
+const hwStatus = $('hw-status');
+const confirmSw = $('confirm-sw');
+const confirmSwText = $('confirm-sw-text');
 const statusBox = $('status');
 const result = $('result');
 const preview = $<HTMLVideoElement>('preview');
 const download = $<HTMLAnchorElement>('download');
 
 const CODEC_LABELS: Record<string, string> = {
-  avc: 'H.264 (most compatible)',
+  avc: 'H.264',
   hevc: 'H.265 / HEVC',
   av1: 'AV1',
   vp9: 'VP9',
@@ -41,6 +56,12 @@ let entries: Entry[] = [];
 let nextId = 1;
 let running: AbortController | null = null;
 let resultUrl: string | null = null;
+let encoders: EncoderSupport[] = [];
+let probeSeq = 0;
+/** Progress of the clip currently being merged, keyed by entry id (0..1). */
+const clipProgress = new Map<number, number>();
+let activeClipId: number | null = null;
+const baseTitle = document.title;
 const canStreamToDisk = 'showSaveFilePicker' in window;
 
 // ---------- helpers ----------
@@ -70,10 +91,14 @@ function showStatus(msg: string, isError = false) {
   statusBox.hidden = false;
 }
 
+function firstClip(): ClipInfo | undefined {
+  return entries[0]?.info;
+}
+
 function targetSize(): { width: number; height: number } | null {
   const v = resolutionSel.value;
   if (v === 'source') {
-    const first = entries.find((e) => e.info)?.info;
+    const first = firstClip();
     return first ? { width: even(first.width), height: even(first.height) } : null;
   }
   if (v === 'custom') {
@@ -87,6 +112,50 @@ function targetSize(): { width: number; height: number } | null {
 
 function even(n: number) {
   return Math.max(2, Math.round(n / 2) * 2);
+}
+
+const STANDARD_RATES = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 72, 75, 90, 100, 119.88, 120, 144, 165, 240];
+
+/** Measured rates wobble slightly (e.g. 59.93); snap to the nearest standard rate when within 1%. */
+function snapFps(fps: number): number {
+  const near = STANDARD_RATES.reduce((a, b) => (Math.abs(b - fps) < Math.abs(a - fps) ? b : a));
+  return Math.abs(near - fps) / near < 0.01 ? near : Math.max(1, Math.round(fps));
+}
+
+function fmtFps(fps: number): string {
+  return String(Number(fps.toFixed(3)));
+}
+
+function targetFps(): number | null {
+  if (fpsSel.value === 'source') {
+    const first = firstClip();
+    return first ? snapFps(first.fps) : null;
+  }
+  return Number(fpsSel.value);
+}
+
+/** Bits per pixel per frame for each preset, applied to the output's pixel rate. */
+const QUALITY_BPP: Record<string, number> = { 'very-high': 0.15, high: 0.1, medium: 0.06, low: 0.035 };
+
+function fmtMbps(bps: number): string {
+  return `${(bps / 1e6).toFixed(bps < 10e6 ? 1 : 0)} Mbps`;
+}
+
+function roundBitrate(bps: number): number {
+  return Math.max(100_000, Math.round(bps / 100_000) * 100_000);
+}
+
+/** The first clip's bitrate, scaled by pixel rate if the output size or frame rate differs from it. */
+function sourceBitrate(width: number, height: number, fps: number): number | null {
+  const first = firstClip();
+  if (!first || !first.bitrate) return null;
+  const scale = (width * height * fps) / (first.width * first.height * snapFps(first.fps));
+  return roundBitrate(first.bitrate * scale);
+}
+
+function outputShape() {
+  const size = targetSize() ?? { width: 3440, height: 1440 };
+  return { ...size, fps: targetFps() ?? 60 };
 }
 
 // ---------- clip list ----------
@@ -113,6 +182,7 @@ async function addFiles(files: Iterable<File>) {
     }),
   );
   refreshCodecs();
+  renderHw();
 }
 
 async function thumbUrl(canvas: HTMLCanvasElement | OffscreenCanvas): Promise<string> {
@@ -144,6 +214,7 @@ function move(id: number, delta: number) {
 }
 
 let dragId: number | null = null;
+let lastFirstKey: number | null = null;
 
 function render() {
   list.replaceChildren(
@@ -183,12 +254,18 @@ function render() {
       } else if (entry.info) {
         const i = entry.info;
         meta.textContent = `${i.width}×${i.height} · ${i.fps.toFixed(2).replace(/\.?0+$/, '')} fps · ${fmtTime(i.duration)} · ${i.codec} · ${fmtBytes(entry.file.size)}${i.audio ? '' : ' · no audio'}`;
+        const dec = document.createElement('span');
         if (!i.canDecode) {
-          const w = document.createElement('span');
-          w.className = 'warn';
-          w.textContent = ` · this browser can't decode ${i.codec}`;
-          meta.append(w);
+          dec.className = 'warn';
+          dec.textContent = ` · this browser can't decode ${i.codec}`;
+        } else if (i.hwDecode) {
+          dec.className = 'gpu';
+          dec.textContent = ' · GPU decode';
+        } else {
+          dec.className = 'warn';
+          dec.textContent = ' · CPU decode (slow)';
         }
+        meta.append(dec);
       } else {
         meta.textContent = 'Reading…';
       }
@@ -213,6 +290,11 @@ function render() {
       );
 
       li.append(index, thumb, body, ctrl);
+      const clipBar = document.createElement('div');
+      clipBar.className = 'clip-bar';
+      clipBar.style.width = `${(clipProgress.get(entry.id) ?? 0) * 100}%`;
+      li.append(clipBar);
+      li.classList.toggle('active', activeClipId === entry.id);
 
       li.addEventListener('dragstart', (ev) => {
         dragId = entry.id;
@@ -236,6 +318,13 @@ function render() {
     }),
   );
 
+  // Defaults follow the first clip, so re-resolve settings whenever a different clip moves to the top.
+  const firstKey = entries[0]?.info ? entries[0].id : null;
+  if (firstKey !== lastFirstKey) {
+    lastFirstKey = firstKey;
+    refreshCodecs();
+  }
+
   const ready = entries.filter((e) => e.info);
   const total = ready.reduce((s, e) => s + e.info!.duration, 0);
   listHead.hidden = entries.length === 0;
@@ -245,31 +334,132 @@ function render() {
 
 function updateMergeButton() {
   const allReady = entries.length > 0 && entries.every((e) => e.info && e.info.canDecode);
-  mergeBtn.disabled = !!running || !allReady || !targetSize() || !codecSel.value;
+  const enc = selectedEncoder();
+  const encoderOk = !!enc && (accelSel.value === 'auto' || enc.hardware);
+  mergeBtn.disabled = !!running || !allReady || !targetSize() || !targetFps() || !encoderOk;
+}
+
+function selectedEncoder(): EncoderSupport | undefined {
+  return encoders.find((e) => e.codec === codecSel.value);
+}
+
+function currentQuality(): number {
+  const { width, height, fps } = outputShape();
+  const v = qualitySel.value;
+  if (v === 'custom') return Math.max(100_000, Math.round(Number(bitrateInput.value) * 1_000_000));
+  if (v === 'source') {
+    const b = sourceBitrate(width, height, fps);
+    if (b) return b;
+  }
+  return roundBitrate(width * height * fps * (QUALITY_BPP[v] ?? QUALITY_BPP.high));
+}
+
+/** Puts the resolved numbers into the option labels so every choice shows what it means. */
+function updateOptionLabels() {
+  const first = firstClip();
+  const { width, height, fps } = outputShape();
+  const set = (sel: HTMLSelectElement, value: string, text: string) => {
+    const o = sel.querySelector<HTMLOptionElement>(`option[value="${value}"]`);
+    if (o) o.textContent = text;
+  };
+  set(resolutionSel, 'source', first ? `Match first clip (${even(first.width)} × ${even(first.height)})` : 'Match first clip');
+  set(fpsSel, 'source', first ? `Match first clip (${fmtFps(snapFps(first.fps))} fps)` : 'Match first clip');
+  const src = sourceBitrate(width, height, fps);
+  const scaled = first && src && Math.abs(src - roundBitrate(first.bitrate)) > 100_000;
+  set(
+    qualitySel,
+    'source',
+    src ? `Match first clip (${fmtMbps(src)}${scaled ? ', scaled to output' : ''})` : 'Match first clip',
+  );
+  const names: Record<string, string> = { 'very-high': 'Very high', high: 'High', medium: 'Medium', low: 'Low' };
+  for (const [level, bpp] of Object.entries(QUALITY_BPP)) {
+    set(qualitySel, level, `${names[level]} (${fmtMbps(roundBitrate(width * height * fps * bpp))})`);
+  }
+}
+
+/** Shows whether encoding and each clip's decoding will run on the GPU, based on the browser's own capability check. */
+function renderHw() {
+  const size = targetSize();
+  const enc = selectedEncoder();
+  const rows: HTMLElement[] = [];
+  const row = (ok: boolean, text: string) => {
+    const d = document.createElement('div');
+    d.className = 'row';
+    const icon = document.createElement('span');
+    icon.className = ok ? 'ok' : 'bad';
+    icon.textContent = ok ? '✓' : '✗';
+    const t = document.createElement('span');
+    t.textContent = text;
+    d.append(icon, t);
+    rows.push(d);
+  };
+
+  if (enc && size) {
+    const what = `${CODEC_LABELS[enc.codec]} at ${size.width}×${size.height} ${fmtFps(targetFps() ?? 60)} fps, ${fmtMbps(currentQuality())}`;
+    row(enc.hardware, enc.hardware ? `GPU encoder available for ${what}` : `No GPU encoder for ${what}; encoding would run on the CPU`);
+  }
+  const clips = entries.filter((e) => e.info?.canDecode);
+  if (clips.length) {
+    const cpu = clips.filter((e) => !e.info!.hwDecode);
+    row(
+      cpu.length === 0,
+      cpu.length === 0
+        ? `GPU decoder available for all ${clips.length} clip${clips.length === 1 ? '' : 's'}`
+        : `${cpu.length} of ${clips.length} clips have no GPU decoder and will decode on the CPU`,
+    );
+  }
+  const anyHw = encoders.some((e) => e.hardware);
+  if (enc && !enc.hardware) {
+    const tip = document.createElement('p');
+    tip.className = 'tip';
+    tip.textContent = anyHw
+      ? `Pick a codec marked GPU for fast encoding.`
+      : 'No GPU video encoder is reachable. In Edge, open edge://settings/system and turn on "Use graphics acceleration when available", ' +
+        'then check edge://gpu: "Video Encode" should say "Hardware accelerated". Very wide sizes can exceed what some GPUs encode; ' +
+        'try H.264 or HEVC at 3440×1440 or lower.';
+    rows.push(tip);
+  }
+  hwStatus.replaceChildren(...rows);
 }
 
 // ---------- settings ----------
 
 async function refreshCodecs() {
   const size = targetSize() ?? { width: 3440, height: 1440 };
+  const seq = ++probeSeq;
   const prev = codecSel.value;
-  const codecs = await supportedVideoCodecs(size.width, size.height, Number(fpsSel.value));
+  updateOptionLabels();
+  const found = await probeEncoders(size.width, size.height, targetFps() ?? 60, currentQuality());
+  if (seq !== probeSeq) return; // a newer probe superseded this one
+  encoders = found;
   codecSel.replaceChildren(
-    ...codecs.map((c) => {
+    ...encoders.map((e) => {
       const o = document.createElement('option');
-      o.value = c;
-      o.textContent = CODEC_LABELS[c] ?? c;
+      o.value = e.codec;
+      o.textContent = `${CODEC_LABELS[e.codec] ?? e.codec} · ${e.hardware ? 'GPU' : 'CPU only'}`;
       return o;
     }),
   );
-  if (codecs.length === 0) {
+  if (encoders.length === 0) {
     const o = document.createElement('option');
     o.value = '';
     o.textContent = `No encoder for ${size.width}×${size.height}`;
     codecSel.append(o);
-  } else if (codecs.includes(prev as VideoCodec)) {
-    codecSel.value = prev;
+  } else {
+    const keep = encoders.find((e) => e.codec === prev && (e.hardware || !encoders.some((x) => x.hardware)));
+    codecSel.value = (keep ?? encoders.find((e) => e.hardware) ?? encoders[0]).codec;
   }
+  syncAccel();
+}
+
+/** "GPU only" can't work without a GPU encoder, so fall back to auto in that case. */
+function syncAccel() {
+  const enc = selectedEncoder();
+  const requireOpt = accelSel.querySelector<HTMLOptionElement>('option[value="require"]')!;
+  requireOpt.disabled = !enc?.hardware;
+  if (!enc?.hardware) accelSel.value = 'auto';
+  else if (!accelSel.dataset.userSet) accelSel.value = 'require';
+  renderHw();
   updateMergeButton();
 }
 
@@ -280,10 +470,23 @@ resolutionSel.addEventListener('change', () => {
 customW.addEventListener('change', refreshCodecs);
 customH.addEventListener('change', refreshCodecs);
 fpsSel.addEventListener('change', refreshCodecs);
-codecSel.addEventListener('change', updateMergeButton);
-qualitySel.addEventListener('change', () => {
-  customBitrate.hidden = qualitySel.value !== 'custom';
+codecSel.addEventListener('change', syncAccel);
+accelSel.addEventListener('change', () => {
+  accelSel.dataset.userSet = '1';
+  updateMergeButton();
 });
+qualitySel.addEventListener('change', () => {
+  const custom = qualitySel.value === 'custom';
+  if (custom && customBitrate.hidden) {
+    // Start the custom field from the matched bitrate so it's an easy tweak.
+    const { width, height, fps } = outputShape();
+    const b = sourceBitrate(width, height, fps) ?? currentQuality();
+    bitrateInput.value = (b / 1e6).toFixed(1).replace(/\.0$/, '');
+  }
+  customBitrate.hidden = !custom;
+  refreshCodecs();
+});
+bitrateInput.addEventListener('change', refreshCodecs);
 
 // ---------- file input ----------
 
@@ -318,17 +521,46 @@ $('clear').addEventListener('click', () => {
   entries.forEach(disposeEntry);
   entries = [];
   render();
+  renderHw();
 });
 
 // ---------- merge ----------
 
-mergeBtn.addEventListener('click', async () => {
+mergeBtn.addEventListener('click', () => {
+  confirmSw.hidden = true;
+  const enc = selectedEncoder();
+  const cpuDecode = entries.filter((e) => !e.info?.hwDecode).length;
+  const cpuParts: string[] = [];
+  if (enc && !enc.hardware) cpuParts.push(`encoding (${CODEC_LABELS[enc.codec]} has no GPU encoder at this size)`);
+  if (cpuDecode) cpuParts.push(`decoding for ${cpuDecode} clip${cpuDecode === 1 ? '' : 's'}`);
+  if (cpuParts.length) {
+    // Ask in-page rather than with confirm(): the save dialog opened next needs a fresh click to be allowed.
+    confirmSwText.textContent =
+      `Not everything can run on the GPU: ${cpuParts.join(' and ')} will run on the CPU. ` +
+      'At 3440×1440 this can be many times slower than real time.';
+    confirmSw.hidden = false;
+    return;
+  }
+  startMerge();
+});
+$('confirm-sw-go').addEventListener('click', () => {
+  confirmSw.hidden = true;
+  startMerge();
+});
+$('confirm-sw-cancel').addEventListener('click', () => {
+  confirmSw.hidden = true;
+});
+
+async function startMerge() {
   const size = targetSize();
   if (!size) return;
   const clips = entries.map((e) => e.info!);
-  const frameRate = Number(fpsSel.value);
-  const quality: QualityLevel | number =
-    qualitySel.value === 'custom' ? Math.round(Number(bitrateInput.value) * 1_000_000) : (qualitySel.value as QualityLevel);
+  const ids = entries.map((e) => e.id);
+  const frameRate = targetFps();
+  if (!frameRate) return;
+  const quality = currentQuality();
+  const enc = selectedEncoder();
+  const acceleration = accelSel.value === 'require' ? 'require' : 'auto';
 
   // Stream straight to disk when possible so multi-GB outputs don't have to fit in RAM.
   let sink: OutputSink = { kind: 'memory' };
@@ -357,54 +589,115 @@ mergeBtn.addEventListener('click', async () => {
   }
   cancelBtn.hidden = false;
   progressWrap.hidden = false;
-  progress.value = 0;
-  stats.textContent = 'Starting…';
+  clipProgress.clear();
+  activeClipId = null;
+  const engine = acceleration === 'require' ? 'GPU' : enc?.hardware ? 'GPU if available' : 'CPU';
   render();
 
   const started = performance.now();
   let lastPaint = 0;
+  let lastFrames = 0;
+  let lastFramesAt = started;
+  let encodeFps = 0;
+
+  function paintProgress(p: MergeProgress, now = performance.now()) {
+    const frac = p.total ? Math.min(1, p.done / p.total) : 0;
+    const elapsed = (now - started) / 1000 || 0;
+    const speed = elapsed > 0 ? p.done / elapsed : 0;
+    const left = speed > 0 ? (p.total - p.done) / speed : Infinity;
+    if (now - lastFramesAt >= 1000) {
+      const inst = ((p.framesEncoded - lastFrames) * 1000) / (now - lastFramesAt);
+      encodeFps = encodeFps ? encodeFps * 0.6 + inst * 0.4 : inst;
+      lastFrames = p.framesEncoded;
+      lastFramesAt = now;
+    }
+    const text = `${(frac * 100).toFixed(1)}%`;
+    pct.textContent = text;
+    barFill.style.width = `${frac * 100}%`;
+    bar.setAttribute('aria-valuenow', String(Math.round(frac * 100)));
+    document.title = `${text} · ${baseTitle}`;
+    const clip = clips[p.clipIndex];
+    phase.textContent = clip ? `Clip ${p.clipIndex + 1} of ${clips.length}: ${clip.file.name}` : '';
+
+    // Per-clip bars in the list, updated in place to avoid rebuilding rows several times a second.
+    ids.forEach((id, i) => {
+      const v = i < p.clipIndex ? 1 : i === p.clipIndex && clip ? Math.min(1, p.clipDone / clip.duration) : 0;
+      clipProgress.set(id, v);
+    });
+    activeClipId = ids[p.clipIndex] ?? null;
+    for (const li of list.querySelectorAll<HTMLLIElement>('li.clip')) {
+      const id = Number(li.dataset.id);
+      li.classList.toggle('active', id === activeClipId);
+      const b = li.querySelector<HTMLElement>('.clip-bar');
+      if (b) b.style.width = `${(clipProgress.get(id) ?? 0) * 100}%`;
+    }
+
+    const cell = (value: string, label: string) => `<div><b>${value}</b><span>${label}</span></div>`;
+    stats.innerHTML =
+      cell(`${fmtTime(p.done)} / ${fmtTime(p.total)}`, 'processed') +
+      cell(encodeFps ? `${encodeFps.toFixed(0)} fps` : '…', `encoding (${engine})`) +
+      cell(speed ? `${speed.toFixed(2)}×` : '…', 'real time') +
+      cell(fmtTime(elapsed), 'elapsed') +
+      cell(isFinite(left) ? fmtTime(left) : '…', 'remaining');
+  }
+
+  paintProgress({ done: 0, total: clips.reduce((s, c) => s + c.duration, 0), clipIndex: 0, clipDone: 0, framesEncoded: 0 });
+
+  let final: MergeProgress | null = null;
   try {
     const blob = await mergeClips(clips, sink, {
       ...size,
       frameRate,
       codec: codecSel.value as VideoCodec,
       quality,
+      acceleration,
       signal: running.signal,
-      onProgress: (done, total) => {
+      onProgress: (p) => {
+        final = p;
         const now = performance.now();
-        if (now - lastPaint < 200 && done < total) return;
+        if (now - lastPaint < 250 && p.done < p.total) return;
         lastPaint = now;
-        const elapsed = (now - started) / 1000;
-        const speed = done / elapsed;
-        progress.value = total ? done / total : 0;
-        stats.textContent =
-          `${(progress.value * 100).toFixed(1)}% · ${fmtTime(done)} / ${fmtTime(total)} · ` +
-          `${speed.toFixed(2)}× realtime · ${fmtTime(elapsed)} elapsed · ${fmtTime((total - done) / speed)} left`;
+        paintProgress(p, now);
       },
     });
     const elapsed = (performance.now() - started) / 1000;
+    const frames = (final as MergeProgress | null)?.framesEncoded ?? 0;
+    const gpuDecodeAll = clips.every((c) => c.hwDecode);
+    const accelNote =
+      acceleration === 'require'
+        ? `GPU encode confirmed${gpuDecodeAll ? ' and GPU decode confirmed' : '; some clips decoded on the CPU'} (GPU-only mode)`
+        : `acceleration: ${engine}`;
+    const how = `${frames} frames at ${(frames / elapsed).toFixed(0)} fps average, ${accelNote}`;
     if (blob) {
       resultUrl = URL.createObjectURL(blob);
       preview.src = resultUrl;
       download.href = resultUrl;
       result.hidden = false;
-      showStatus(`Done in ${fmtTime(elapsed)}. Output: ${fmtBytes(blob.size)}.`);
+      showStatus(`Done in ${fmtTime(elapsed)}. Output: ${fmtBytes(blob.size)}. ${how}.`);
     } else {
-      showStatus(`Done in ${fmtTime(elapsed)}. Saved to ${savedName}.`);
+      showStatus(`Done in ${fmtTime(elapsed)}. Saved to ${savedName}. ${how}.`);
     }
+    document.title = `Done · ${baseTitle}`;
   } catch (err) {
+    document.title = baseTitle;
     if (running.signal.aborted) {
       showStatus('Cancelled.', true);
     } else {
       console.error(err);
-      showStatus(`Merge failed: ${err instanceof Error ? err.message : String(err)}`, true);
+      const msg = err instanceof Error ? err.message : String(err);
+      const hint =
+        acceleration === 'require'
+          ? ' The GPU refused this job. Try another codec marked GPU, a lower resolution, or switch Acceleration to "Allow CPU fallback".'
+          : '';
+      showStatus(`Merge failed: ${msg}${hint}`, true);
     }
   } finally {
     running = null;
+    activeClipId = null;
     cancelBtn.hidden = true;
     render();
   }
-});
+}
 
 cancelBtn.addEventListener('click', () => running?.abort());
 

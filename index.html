@@ -41,8 +41,8 @@
         <div class="field">
           <label for="resolution">Resolution</label>
           <select id="resolution">
-            <option value="3440x1440" selected>3440 × 1440</option>
-            <option value="source">Match first clip</option>
+            <option value="source" selected>Match first clip</option>
+            <option value="3440x1440">3440 × 1440</option>
             <option value="2560x1080">2560 × 1080</option>
             <option value="3840x2160">3840 × 2160</option>
             <option value="2560x1440">2560 × 1440</option>
@@ -58,8 +58,9 @@
         <div class="field">
           <label for="fps">Frame rate</label>
           <select id="fps">
+            <option value="source" selected>Match first clip</option>
             <option value="30">30 fps</option>
-            <option value="60" selected>60 fps</option>
+            <option value="60">60 fps</option>
             <option value="120">120 fps</option>
             <option value="144">144 fps</option>
           </select>
@@ -71,8 +72,9 @@
         <div class="field">
           <label for="quality">Quality</label>
           <select id="quality">
+            <option value="source" selected>Match first clip</option>
             <option value="very-high">Very high</option>
-            <option value="high" selected>High</option>
+            <option value="high">High</option>
             <option value="medium">Medium</option>
             <option value="low">Low</option>
             <option value="custom">Custom bitrate…</option>
@@ -82,6 +84,14 @@
             <span>Mbps</span>
           </div>
         </div>
+        <div class="field">
+          <label for="accel">Acceleration</label>
+          <select id="accel">
+            <option value="require" selected>GPU only</option>
+            <option value="auto">Allow CPU fallback</option>
+          </select>
+        </div>
+        <div id="hw-status" class="hw full" aria-live="polite"></div>
       </section>
 
       <section class="card run">
@@ -90,9 +100,22 @@
           <button type="button" id="cancel" hidden>Cancel</button>
         </div>
         <p class="hint" id="save-hint"></p>
-        <div id="progress-wrap" hidden>
-          <progress id="progress" max="1" value="0"></progress>
-          <div class="stats" id="stats"></div>
+        <div id="confirm-sw" class="notice error confirm" hidden>
+          <p id="confirm-sw-text"></p>
+          <div class="buttons">
+            <button type="button" id="confirm-sw-go">Merge anyway on CPU</button>
+            <button type="button" id="confirm-sw-cancel" class="ghost">Cancel</button>
+          </div>
+        </div>
+        <div id="progress-wrap" class="progress" hidden>
+          <div class="progress-head">
+            <span id="pct" class="pct">0%</span>
+            <span id="phase" class="phase"></span>
+          </div>
+          <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="bar">
+            <div class="fill" id="bar-fill"></div>
+          </div>
+          <div class="stat-grid" id="stats"></div>
         </div>
         <div id="status" class="notice" hidden></div>
         <div id="result" hidden>
