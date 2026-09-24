@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>MP4 Merger</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect x='3' y='7' width='26' height='18' rx='3' fill='%234f7cff'/><path d='M13 11l8 5-8 5z' fill='white'/></svg>" />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>MP4 Merger</h1>
+        <p class="sub">
+          Join videos into one MP4, resized and converted to a constant frame rate. Everything runs in your browser
+          with hardware encoding; files never leave your machine.
+        </p>
+      </header>
+
+      <div id="unsupported" class="notice error" hidden>
+        This browser does not support the WebCodecs API. Use a recent Chrome, Edge, or Safari.
+      </div>
+
+      <section class="card">
+        <label id="drop" class="drop">
+          <input id="file-input" type="file" accept="video/*,.mp4,.mov,.m4v,.mkv,.webm" multiple hidden />
+          <strong>Drop videos here</strong> or click to choose
+        </label>
+        <div class="list-head" id="list-head" hidden>
+          <span id="summary"></span>
+          <span class="actions">
+            <button type="button" id="sort-name" class="ghost">Sort by name</button>
+            <button type="button" id="clear" class="ghost">Clear</button>
+          </span>
+        </div>
+        <ol id="clips" class="clips"></ol>
+      </section>
+
+      <section class="card settings">
+        <div class="field">
+          <label for="resolution">Resolution</label>
+          <select id="resolution">
+            <option value="3440x1440" selected>3440 × 1440</option>
+            <option value="source">Match first clip</option>
+            <option value="2560x1080">2560 × 1080</option>
+            <option value="3840x2160">3840 × 2160</option>
+            <option value="2560x1440">2560 × 1440</option>
+            <option value="1920x1080">1920 × 1080</option>
+            <option value="custom">Custom…</option>
+          </select>
+          <div id="custom-res" class="inline" hidden>
+            <input id="custom-w" type="number" min="16" step="2" value="3440" aria-label="Width" />
+            <span>×</span>
+            <input id="custom-h" type="number" min="16" step="2" value="1440" aria-label="Height" />
+          </div>
+        </div>
+        <div class="field">
+          <label for="fps">Frame rate</label>
+          <select id="fps">
+            <option value="30">30 fps</option>
+            <option value="60" selected>60 fps</option>
+            <option value="120">120 fps</option>
+            <option value="144">144 fps</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="codec">Codec</label>
+          <select id="codec"></select>
+        </div>
+        <div class="field">
+          <label for="quality">Quality</label>
+          <select id="quality">
+            <option value="very-high">Very high</option>
+            <option value="high" selected>High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="custom">Custom bitrate…</option>
+          </select>
+          <div id="custom-bitrate" class="inline" hidden>
+            <input id="bitrate" type="number" min="1" max="500" value="40" aria-label="Bitrate in Mbps" />
+            <span>Mbps</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="card run">
+        <div class="buttons">
+          <button type="button" id="merge" class="primary" disabled>Merge</button>
+          <button type="button" id="cancel" hidden>Cancel</button>
+        </div>
+        <p class="hint" id="save-hint"></p>
+        <div id="progress-wrap" hidden>
+          <progress id="progress" max="1" value="0"></progress>
+          <div class="stats" id="stats"></div>
+        </div>
+        <div id="status" class="notice" hidden></div>
+        <div id="result" hidden>
+          <video id="preview" controls playsinline></video>
+          <a id="download" class="button primary" download="merged.mp4">Download</a>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
