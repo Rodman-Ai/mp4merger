@@ -1,4 +1,4 @@
-import { CanvasSink, type QualityLevel, type VideoCodec } from 'mediabunny';
+import { CanvasSink, type VideoCodec } from 'mediabunny';
 import {
   mergeClips,
   probeClip,
@@ -91,10 +91,14 @@ function showStatus(msg: string, isError = false) {
   statusBox.hidden = false;
 }
 
+function firstClip(): ClipInfo | undefined {
+  return entries[0]?.info;
+}
+
 function targetSize(): { width: number; height: number } | null {
   const v = resolutionSel.value;
   if (v === 'source') {
-    const first = entries.find((e) => e.info)?.info;
+    const first = firstClip();
     return first ? { width: even(first.width), height: even(first.height) } : null;
   }
   if (v === 'custom') {
@@ -108,6 +112,50 @@ function targetSize(): { width: number; height: number } | null {
 
 function even(n: number) {
   return Math.max(2, Math.round(n / 2) * 2);
+}
+
+const STANDARD_RATES = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 72, 75, 90, 100, 119.88, 120, 144, 165, 240];
+
+/** Measured rates wobble slightly (e.g. 59.93); snap to the nearest standard rate when within 1%. */
+function snapFps(fps: number): number {
+  const near = STANDARD_RATES.reduce((a, b) => (Math.abs(b - fps) < Math.abs(a - fps) ? b : a));
+  return Math.abs(near - fps) / near < 0.01 ? near : Math.max(1, Math.round(fps));
+}
+
+function fmtFps(fps: number): string {
+  return String(Number(fps.toFixed(3)));
+}
+
+function targetFps(): number | null {
+  if (fpsSel.value === 'source') {
+    const first = firstClip();
+    return first ? snapFps(first.fps) : null;
+  }
+  return Number(fpsSel.value);
+}
+
+/** Bits per pixel per frame for each preset, applied to the output's pixel rate. */
+const QUALITY_BPP: Record<string, number> = { 'very-high': 0.15, high: 0.1, medium: 0.06, low: 0.035 };
+
+function fmtMbps(bps: number): string {
+  return `${(bps / 1e6).toFixed(bps < 10e6 ? 1 : 0)} Mbps`;
+}
+
+function roundBitrate(bps: number): number {
+  return Math.max(100_000, Math.round(bps / 100_000) * 100_000);
+}
+
+/** The first clip's bitrate, scaled by pixel rate if the output size or frame rate differs from it. */
+function sourceBitrate(width: number, height: number, fps: number): number | null {
+  const first = firstClip();
+  if (!first || !first.bitrate) return null;
+  const scale = (width * height * fps) / (first.width * first.height * snapFps(first.fps));
+  return roundBitrate(first.bitrate * scale);
+}
+
+function outputShape() {
+  const size = targetSize() ?? { width: 3440, height: 1440 };
+  return { ...size, fps: targetFps() ?? 60 };
 }
 
 // ---------- clip list ----------
@@ -166,6 +214,7 @@ function move(id: number, delta: number) {
 }
 
 let dragId: number | null = null;
+let lastFirstKey: number | null = null;
 
 function render() {
   list.replaceChildren(
@@ -269,6 +318,13 @@ function render() {
     }),
   );
 
+  // Defaults follow the first clip, so re-resolve settings whenever a different clip moves to the top.
+  const firstKey = entries[0]?.info ? entries[0].id : null;
+  if (firstKey !== lastFirstKey) {
+    lastFirstKey = firstKey;
+    refreshCodecs();
+  }
+
   const ready = entries.filter((e) => e.info);
   const total = ready.reduce((s, e) => s + e.info!.duration, 0);
   listHead.hidden = entries.length === 0;
@@ -280,17 +336,45 @@ function updateMergeButton() {
   const allReady = entries.length > 0 && entries.every((e) => e.info && e.info.canDecode);
   const enc = selectedEncoder();
   const encoderOk = !!enc && (accelSel.value === 'auto' || enc.hardware);
-  mergeBtn.disabled = !!running || !allReady || !targetSize() || !encoderOk;
+  mergeBtn.disabled = !!running || !allReady || !targetSize() || !targetFps() || !encoderOk;
 }
 
 function selectedEncoder(): EncoderSupport | undefined {
   return encoders.find((e) => e.codec === codecSel.value);
 }
 
-function currentQuality(): QualityLevel | number {
-  return qualitySel.value === 'custom'
-    ? Math.max(1, Math.round(Number(bitrateInput.value) * 1_000_000))
-    : (qualitySel.value as QualityLevel);
+function currentQuality(): number {
+  const { width, height, fps } = outputShape();
+  const v = qualitySel.value;
+  if (v === 'custom') return Math.max(100_000, Math.round(Number(bitrateInput.value) * 1_000_000));
+  if (v === 'source') {
+    const b = sourceBitrate(width, height, fps);
+    if (b) return b;
+  }
+  return roundBitrate(width * height * fps * (QUALITY_BPP[v] ?? QUALITY_BPP.high));
+}
+
+/** Puts the resolved numbers into the option labels so every choice shows what it means. */
+function updateOptionLabels() {
+  const first = firstClip();
+  const { width, height, fps } = outputShape();
+  const set = (sel: HTMLSelectElement, value: string, text: string) => {
+    const o = sel.querySelector<HTMLOptionElement>(`option[value="${value}"]`);
+    if (o) o.textContent = text;
+  };
+  set(resolutionSel, 'source', first ? `Match first clip (${even(first.width)} × ${even(first.height)})` : 'Match first clip');
+  set(fpsSel, 'source', first ? `Match first clip (${fmtFps(snapFps(first.fps))} fps)` : 'Match first clip');
+  const src = sourceBitrate(width, height, fps);
+  const scaled = first && src && Math.abs(src - roundBitrate(first.bitrate)) > 100_000;
+  set(
+    qualitySel,
+    'source',
+    src ? `Match first clip (${fmtMbps(src)}${scaled ? ', scaled to output' : ''})` : 'Match first clip',
+  );
+  const names: Record<string, string> = { 'very-high': 'Very high', high: 'High', medium: 'Medium', low: 'Low' };
+  for (const [level, bpp] of Object.entries(QUALITY_BPP)) {
+    set(qualitySel, level, `${names[level]} (${fmtMbps(roundBitrate(width * height * fps * bpp))})`);
+  }
 }
 
 /** Shows whether encoding and each clip's decoding will run on the GPU, based on the browser's own capability check. */
@@ -311,7 +395,7 @@ function renderHw() {
   };
 
   if (enc && size) {
-    const what = `${CODEC_LABELS[enc.codec]} at ${size.width}×${size.height} ${fpsSel.value} fps`;
+    const what = `${CODEC_LABELS[enc.codec]} at ${size.width}×${size.height} ${fmtFps(targetFps() ?? 60)} fps, ${fmtMbps(currentQuality())}`;
     row(enc.hardware, enc.hardware ? `GPU encoder available for ${what}` : `No GPU encoder for ${what}; encoding would run on the CPU`);
   }
   const clips = entries.filter((e) => e.info?.canDecode);
@@ -344,7 +428,8 @@ async function refreshCodecs() {
   const size = targetSize() ?? { width: 3440, height: 1440 };
   const seq = ++probeSeq;
   const prev = codecSel.value;
-  const found = await probeEncoders(size.width, size.height, Number(fpsSel.value), currentQuality());
+  updateOptionLabels();
+  const found = await probeEncoders(size.width, size.height, targetFps() ?? 60, currentQuality());
   if (seq !== probeSeq) return; // a newer probe superseded this one
   encoders = found;
   codecSel.replaceChildren(
@@ -391,7 +476,14 @@ accelSel.addEventListener('change', () => {
   updateMergeButton();
 });
 qualitySel.addEventListener('change', () => {
-  customBitrate.hidden = qualitySel.value !== 'custom';
+  const custom = qualitySel.value === 'custom';
+  if (custom && customBitrate.hidden) {
+    // Start the custom field from the matched bitrate so it's an easy tweak.
+    const { width, height, fps } = outputShape();
+    const b = sourceBitrate(width, height, fps) ?? currentQuality();
+    bitrateInput.value = (b / 1e6).toFixed(1).replace(/\.0$/, '');
+  }
+  customBitrate.hidden = !custom;
   refreshCodecs();
 });
 bitrateInput.addEventListener('change', refreshCodecs);
@@ -464,7 +556,8 @@ async function startMerge() {
   if (!size) return;
   const clips = entries.map((e) => e.info!);
   const ids = entries.map((e) => e.id);
-  const frameRate = Number(fpsSel.value);
+  const frameRate = targetFps();
+  if (!frameRate) return;
   const quality = currentQuality();
   const enc = selectedEncoder();
   const acceleration = accelSel.value === 'require' ? 'require' : 'auto';

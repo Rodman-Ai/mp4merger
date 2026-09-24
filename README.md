@@ -9,11 +9,13 @@ Everything runs locally in the browser via [WebCodecs](https://developer.mozilla
 ## Features
 
 - Drop in MP4 / MOV / MKV / WebM clips, reorder by drag, arrows, or natural name sort.
-- Output resolution: 3440×1440 (default), match first clip, common presets, or custom. Clips with a different size or
-  aspect ratio are scaled to fit and letterboxed.
-- Constant output frame rate (60 fps default; also 30 / 120 / 144). Frames are duplicated or dropped against a fixed
-  timeline, so 24, 30, 59.94, 144 fps and variable-frame-rate sources all line up.
-- H.264, HEVC, AV1 or VP9, whichever the browser can encode at the chosen size. Quality presets or a fixed bitrate.
+- Resolution, frame rate and bitrate default to matching the first clip in the list. Resolution can also be a preset
+  or custom size; clips with a different size or aspect ratio are scaled to fit and letterboxed.
+- Constant output frame rate (first clip's rate, snapped to a standard value like 59.94, or 30 / 60 / 120 / 144).
+  Frames are duplicated or dropped against a fixed timeline, so mixed and variable-frame-rate sources all line up.
+- H.264, HEVC, AV1 or VP9, whichever the browser can encode at the chosen size. Every quality option shows its
+  bitrate; "Match first clip" uses the first clip's measured average bitrate, scaled if the output size or frame rate
+  differs.
 - GPU check: each codec is probed for a hardware encoder and each clip for a hardware decoder, using the browser's
   own capability check. "GPU only" mode (the default when available) makes the browser use the GPU or fail, instead
   of silently falling back to a slow CPU encoder. If anything would run on the CPU you're asked to confirm first.

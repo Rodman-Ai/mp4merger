@@ -34,6 +34,8 @@ export interface ClipInfo {
   width: number;
   height: number;
   fps: number;
+  /** Average video bitrate over the whole track, in bits per second. */
+  bitrate: number;
   codec: string;
   canDecode: boolean;
   /** Whether the GPU has a decoder for this clip's exact codec profile and size. */
@@ -52,7 +54,8 @@ export async function probeClip(file: File): Promise<ClipInfo> {
   const [start, end, stats, canDecode, hwDecode] = await Promise.all([
     input.getFirstTimestamp(tracks),
     input.computeDuration(tracks),
-    video.computePacketStats(120),
+    // Full scan: MP4 sample tables make this cheap, and it gives the true average bitrate, not just the intro's.
+    video.computePacketStats(),
     video.canDecode(),
     canDecodeInHardware(video),
   ]);
@@ -66,6 +69,7 @@ export async function probeClip(file: File): Promise<ClipInfo> {
     width: video.displayWidth,
     height: video.displayHeight,
     fps: stats.averagePacketRate,
+    bitrate: stats.averageBitrate,
     codec: video.codec ?? 'unknown',
     canDecode,
     hwDecode,
