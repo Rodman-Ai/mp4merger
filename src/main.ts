@@ -114,12 +114,20 @@ function even(n: number) {
   return Math.max(2, Math.round(n / 2) * 2);
 }
 
-const STANDARD_RATES = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 72, 75, 90, 100, 119.88, 120, 144, 165, 240];
+const NTSC_RATES = [24000 / 1001, 30000 / 1001, 60000 / 1001, 120000 / 1001];
+const COMMON_RATES = [24, 25, 30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240];
 
-/** Measured rates wobble slightly (e.g. 59.93); snap to the nearest standard rate when within 1%. */
+/**
+ * Screen recorders often produce slightly irregular timing, so a "60 fps" capture can measure 59.886. Rates within
+ * 0.5% of a common rate are treated as that rate. NTSC rates (59.94 etc.) only match when essentially exact, since
+ * real NTSC files measure precisely. Anything else, such as 45 fps, is kept as measured.
+ */
 function snapFps(fps: number): number {
-  const near = STANDARD_RATES.reduce((a, b) => (Math.abs(b - fps) < Math.abs(a - fps) ? b : a));
-  return Math.abs(near - fps) / near < 0.01 ? near : Math.max(1, Math.round(fps));
+  const ntsc = NTSC_RATES.find((r) => Math.abs(r - fps) / r < 0.0002);
+  if (ntsc) return ntsc;
+  const common = COMMON_RATES.find((r) => Math.abs(r - fps) / r < 0.005);
+  if (common) return common;
+  return Number(fps.toFixed(3));
 }
 
 function fmtFps(fps: number): string {
@@ -253,7 +261,16 @@ function render() {
         meta.append(w);
       } else if (entry.info) {
         const i = entry.info;
-        meta.textContent = `${i.width}×${i.height} · ${i.fps.toFixed(2).replace(/\.?0+$/, '')} fps · ${fmtTime(i.duration)} · ${i.codec} · ${fmtBytes(entry.file.size)}${i.audio ? '' : ' · no audio'}`;
+        const chips = document.createElement('div');
+        chips.className = 'chips';
+        for (const text of [`${i.width}×${i.height}`, `${fmtFps(i.fps)} fps`, i.bitrate ? fmtMbps(i.bitrate) : '? Mbps']) {
+          const c = document.createElement('span');
+          c.className = 'chip';
+          c.textContent = text;
+          chips.append(c);
+        }
+        meta.append(chips);
+        meta.append(`${fmtTime(i.duration)} · ${i.codec} · ${fmtBytes(entry.file.size)}${i.audio ? '' : ' · no audio'}`);
         const dec = document.createElement('span');
         if (!i.canDecode) {
           dec.className = 'warn';
@@ -362,14 +379,21 @@ function updateOptionLabels() {
     const o = sel.querySelector<HTMLOptionElement>(`option[value="${value}"]`);
     if (o) o.textContent = text;
   };
-  set(resolutionSel, 'source', first ? `Match first clip (${even(first.width)} × ${even(first.height)})` : 'Match first clip');
-  set(fpsSel, 'source', first ? `Match first clip (${fmtFps(snapFps(first.fps))} fps)` : 'Match first clip');
+  set(resolutionSel, 'source', first ? `First clip (${even(first.width)} × ${even(first.height)})` : 'Match first clip');
+  if (first) {
+    const snapped = snapFps(first.fps);
+    const measured = fmtFps(first.fps);
+    const note = fmtFps(snapped) !== measured ? ` from ${measured}` : '';
+    set(fpsSel, 'source', `First clip (${fmtFps(snapped)} fps${note})`);
+  } else {
+    set(fpsSel, 'source', 'Match first clip');
+  }
   const src = sourceBitrate(width, height, fps);
   const scaled = first && src && Math.abs(src - roundBitrate(first.bitrate)) > 100_000;
   set(
     qualitySel,
     'source',
-    src ? `Match first clip (${fmtMbps(src)}${scaled ? ', scaled to output' : ''})` : 'Match first clip',
+    src ? `First clip (${fmtMbps(src)}${scaled ? ', scaled' : ''})` : 'Match first clip',
   );
   const names: Record<string, string> = { 'very-high': 'Very high', high: 'High', medium: 'Medium', low: 'Low' };
   for (const [level, bpp] of Object.entries(QUALITY_BPP)) {
@@ -394,6 +418,12 @@ function renderHw() {
     rows.push(d);
   };
 
+  if (size) {
+    const out = document.createElement('div');
+    out.className = 'output-summary';
+    out.textContent = `Output: ${size.width}×${size.height} · ${fmtFps(targetFps() ?? 60)} fps · ${fmtMbps(currentQuality())}`;
+    rows.push(out);
+  }
   if (enc && size) {
     const what = `${CODEC_LABELS[enc.codec]} at ${size.width}×${size.height} ${fmtFps(targetFps() ?? 60)} fps, ${fmtMbps(currentQuality())}`;
     row(enc.hardware, enc.hardware ? `GPU encoder available for ${what}` : `No GPU encoder for ${what}; encoding would run on the CPU`);

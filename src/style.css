@@ -146,6 +146,23 @@ h1 {
   font-size: 13px;
 }
 
+.clip .chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+
+.clip .chip {
+  background: var(--drop);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 0 6px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 .clip .meta .warn {
   color: var(--danger);
 }
@@ -165,7 +182,7 @@ h1 {
 
 .settings {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
   gap: 16px;
 }
 
@@ -350,6 +367,11 @@ button.icon {
   gap: 8px;
   align-items: baseline;
   padding: 2px 0;
+}
+
+.hw .output-summary {
+  font-weight: 600;
+  margin-bottom: 4px;
 }
 
 .hw .ok {

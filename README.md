@@ -8,10 +8,12 @@ Everything runs locally in the browser via [WebCodecs](https://developer.mozilla
 
 ## Features
 
-- Drop in MP4 / MOV / MKV / WebM clips, reorder by drag, arrows, or natural name sort.
+- Drop in MP4 / MOV / MKV / WebM clips, reorder by drag, arrows, or natural name sort. Each clip shows its
+  resolution, frame rate and average video bitrate.
 - Resolution, frame rate and bitrate default to matching the first clip in the list. Resolution can also be a preset
   or custom size; clips with a different size or aspect ratio are scaled to fit and letterboxed.
-- Constant output frame rate (first clip's rate, snapped to a standard value like 59.94, or 30 / 60 / 120 / 144).
+- Constant output frame rate: the first clip's rate, or 30 / 60 / 120 / 144. A measured rate within 0.5% of a common
+  rate is treated as that rate (a 59.886 fps capture becomes 60); anything else, like 45, is kept as measured.
   Frames are duplicated or dropped against a fixed timeline, so mixed and variable-frame-rate sources all line up.
 - H.264, HEVC, AV1 or VP9, whichever the browser can encode at the chosen size. Every quality option shows its
   bitrate; "Match first clip" uses the first clip's measured average bitrate, scaled if the output size or frame rate
